@@ -95,7 +95,7 @@ parameters:
 - name: NAMESPACE
   displayName: Namespace
   description: Namespace where the Locust is running
-  value: locust
+  value: locust-oauth-test
   required: true
 
 - name: LOCUST_SLAVE_IMAGE

@@ -5,127 +5,167 @@ labels:
 metadata:
   name: locust-master
 objects:
-  - kind: Service
-    apiVersion: v1
-    metadata:
-      name: locust
-      namespace: ${NAMESPACE}
-    spec:
-      selector:
-        app: locust-master
-      ports:
-        - name: "communication"
-          protocol: TCP
-          port: 5557
-        - name: "communication-plus-1"
-          protocol: TCP
-          port: 5558
-        - name: "web-ui"
-          protocol: TCP
-          port: 8089
-      type: LoadBalancer
+### Oauth Stuff
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: proxy
+    annotations:
+      serviceaccounts.openshift.io/oauth-redirectreference.primary: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"proxy"}}'
+- apiVersion: v1
+  kind: Route
+  metadata:
+    name: proxy
+  spec:
+    to:
+      kind: Service
+      name: proxy
+    tls:
+      termination: Reencrypt
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: proxy
+    annotations:
+      service.alpha.openshift.io/serving-cert-secret-name: proxy-tls
+  spec:
+    ports:
+    - name: proxy
+      port: 443
+      targetPort: 8443
+    selector:
+      app: locust-master
+###################
+- kind: Service
+  apiVersion: v1
+  metadata:
+    name: locust
+    namespace: ${NAMESPACE}
+  spec:
+    selector:
+      app: locust-master
+    ports:
+      - name: "communication"
+        protocol: TCP
+        port: 5557
+      - name: "communication-plus-1"
+        protocol: TCP
+        port: 5558
+      - name: "web-ui"
+        protocol: TCP
+        port: 8089
+    type: LoadBalancer
 
-  - apiVersion: route.openshift.io/v1
-    kind: Route
-    metadata:
-      name: app
-    spec:
-      port:
-        targetPort: web-ui
-      to:
-        kind: Service
-        name: locust
-        weight: 100
-      wildcardPolicy: None
-
-  - kind: DeploymentConfig
-    apiVersion: v1
-    metadata:
-      name: locust-master
-      namespace: ${NAMESPACE}
-    spec:
-      replicas: 1
-      template:
-        metadata:
-          labels:
-            app: locust-master
-        spec:
-          containers:
-          - name: locust-master
-            image: ${LOCUST_IMAGE}
-            env:
-              - name: CONFIG_HASH
-                value: TO_BE_CHANGED
-              - name: ATTACKED_HOST
-                valueFrom:
-                  configMapKeyRef:
-                    name: host-url
-                    key: ATTACKED_HOST
-              - name: LOCUST_MODE
-                value: MASTER
-              - name: LOCUST_OPTS
-                value: --print-stats -P=8089
-            resources:
-              limits:
-                cpu: "100m"
-                memory: "256Mi"
-            ports:
-            - name: comm
-              containerPort: 5557
-            - name: comm-plus-1
-              containerPort: 5558
-            - name: web-ui
-              containerPort: 8089
-            volumeMounts:
-            - name: locust-scripts
-              mountPath: /locust
-              readOnly: true
-          dnsPolicy: ClusterFirst
-          restartPolicy: Always
-          securityContext:
-            privileged: false
-          volumes:
+- kind: DeploymentConfig
+  apiVersion: v1
+  metadata:
+    name: locust-master
+    namespace: ${NAMESPACE}
+  spec:
+    replicas: 1
+    template:
+      metadata:
+        labels:
+          app: locust-master
+      spec:
+        serviceAccountName: proxy
+        containers:
+        - name: locust-master
+          image: ${LOCUST_IMAGE}
+          env:
+            - name: CONFIG_HASH
+              value: TO_BE_CHANGED
+            - name: ATTACKED_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: host-url
+                  key: ATTACKED_HOST
+            - name: LOCUST_MODE
+              value: MASTER
+            - name: LOCUST_OPTS
+              value: --print-stats -P=8089
+          resources:
+            limits:
+              cpu: "100m"
+              memory: "256Mi"
+          ports:
+          - name: comm
+            containerPort: 5557
+          - name: comm-plus-1
+            containerPort: 5558
+          - name: web-ui
+            containerPort: 8089
+          volumeMounts:
           - name: locust-scripts
-            configMap:
-              name: script-file
+            mountPath: /locust
+            readOnly: true
+        - name: oauth-proxy
+          image: openshift/oauth-proxy:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+          - containerPort: 8443
+            name: public
+          args:
+          - --https-address=:8443
+          - --provider=openshift
+          - --openshift-service-account=proxy
+          - --upstream=http://localhost:8089
+          - --tls-cert=/etc/tls/private/tls.crt
+          - --tls-key=/etc/tls/private/tls.key
+          - --cookie-secret=SECRET
+          volumeMounts:
+          - mountPath: /etc/tls/private
+            name: proxy-tls
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        securityContext:
+          privileged: false
+        volumes:
+        - name: locust-scripts
+          configMap:
+            name: script-file
+        - name: proxy-tls
+          secret:
+            secretName: proxy-tls
 
-  - kind: ConfigMap
-    apiVersion: v1
-    metadata:
-      name: script-file
-      namespace: ${NAMESPACE}
-    data:
-      locustfile.py: |
-        from locust import HttpLocust, TaskSet, task
+
+- kind: ConfigMap
+  apiVersion: v1
+  metadata:
+    name: script-file
+    namespace: ${NAMESPACE}
+  data:
+    locustfile.py: |
+      from locust import HttpLocust, TaskSet, task
 
 
-        class UserTasks(TaskSet):
+      class UserTasks(TaskSet):
 
-            @task
-            def index(self):
-                self.client.get("/")
+          @task
+          def index(self):
+              self.client.get("/")
 
-            @task
-            def stats(self):
-                self.client.get("/stats/requests")
+          @task
+          def stats(self):
+              self.client.get("/stats/requests")
 
 
-        class WebsiteUser(HttpLocust):
-            task_set = UserTasks
+      class WebsiteUser(HttpLocust):
+          task_set = UserTasks
 
-  - kind: ConfigMap
-    apiVersion: v1
-    metadata:
-      name: host-url
-      namespace: ${NAMESPACE}
-    data:
-      ATTACKED_HOST: http://locust-master:8089
+- kind: ConfigMap
+  apiVersion: v1
+  metadata:
+    name: host-url
+    namespace: ${NAMESPACE}
+  data:
+    ATTACKED_HOST: http://locust-master:8089
 
 parameters:
 - name: NAMESPACE
   displayName: Namespace
   description: Namespace where the Locust is running
-  value: locust
+  value: locust-oauth-test
   required: true
 
 - name: LOCUST_IMAGE
